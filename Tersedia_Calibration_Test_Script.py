@@ -35,7 +35,7 @@ def select_available_orders(orders_layer, onv_layer, scid):
 
     arcpy.AddMessage("Done")
 
-def create_order_layers(local, sharepoint_location, orders_layer_name, onv_layer_names):
+def create_order_layers(local, orders_layer_name, onv_layer_names, sharepoint_location):
     """ Create feature classes of available orders and add them to the map """
     
     # Get the active map document and data frame
@@ -106,7 +106,7 @@ def move_new_files(staging_location, output_location, file_names):
         arcpy.AddMessage(f"Moved: {file}")
 
 
-def run(local, sharepoint):
+def run(local, sharepoint, path):
     """ This function controls what is run by the tool """
 
     # Load .json file with parameters
@@ -115,8 +115,9 @@ def run(local, sharepoint):
 
     # Define the sharepoint and local locations location if applicable
     if sharepoint: 
-        staging_location = configs["staging_location"]
-        output_location = configs["output_location"]
+        staging_location = os.path.join(path, "Shapefile_Staging")
+        output_location = os.path.join(path, "Shapefile_Output")
+    else: local = True
     if local: local = arcpy.env.workspace
 
     # Define the file names
@@ -125,9 +126,9 @@ def run(local, sharepoint):
 
     # Create the order layers and save the outputed file names to a list 
     file_names = create_order_layers(local, 
-                        staging_location, 
                         orders_layer_name, 
-                        onv_layer_names)
+                        onv_layer_names, 
+                        staging_location)
     
     # Creating a list of file names
     file_types = ['.cpg', '.dbf', '.prj', '.sbn', '.sbx', '.shp', '.shp.xml', '.shx']
