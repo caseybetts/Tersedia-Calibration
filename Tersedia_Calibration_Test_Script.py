@@ -114,8 +114,8 @@ def run(local, sharepoint, path):
         configs = json.load(file)
 
     # Define the sharepoint and local locations location if applicable
+    staging_location = os.path.join(path, "Shapefile_Staging")
     if sharepoint: 
-        staging_location = os.path.join(path, "Shapefile_Staging")
         output_location = os.path.join(path, "Shapefile_Output")
     else: local = True
     if local: local = arcpy.env.workspace
@@ -134,9 +134,13 @@ def run(local, sharepoint, path):
     file_types = ['.cpg', '.dbf', '.prj', '.sbn', '.sbx', '.shp', '.shp.xml', '.shx']
     all_files = [f"{name}{type}" for name in file_names for type in file_types]
     
-    delete_current_files(output_location, all_files)
+    if sharepoint:
 
-    move_new_files(staging_location, output_location, all_files)
+        # Delete all files in the output folder
+        delete_current_files(output_location, all_files)
+
+        # Move the files in the saging location to the output folder
+        move_new_files(staging_location, output_location, all_files)
 
 
 
