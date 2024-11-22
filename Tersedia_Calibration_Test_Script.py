@@ -6,142 +6,226 @@ import json
 import os
 import shutil
 
-# Create feature class of available orders
-def select_available_orders(orders_layer, onv_layer, scid):
-    """ Select orders accessable on a given rev based on the order's max ONA vlaue """
 
-    arcpy.AddMessage(f"Running available_orders for {scid}.....")
+class Tersedia():
+    """ Creates shapefiles of accessible calibration orders for each spacecraft """
 
-    # Definition query values
-    ona_values = [35, 30, 25, 20, 15]
-    
-    # Select orders intersecting the 45deg segments of the rev (max selection)
-    arcpy.management.SelectLayerByLocation(orders_layer, "INTERSECT", onv_layer, None, "NEW_SELECTION")
+    def __init__(self, path):
 
-    # Select only the orders that are avaialble based on their max ONA value    
-    for ona in ona_values:
+        # Load .json file with parameters
+        with open('config.json', 'r', errors="ignore") as file:
+            configs = json.load(file)
 
-        # Deselect orders with ONA under current value
-        arcpy.management.SelectLayerByAttribute(orders_layer, "REMOVE_FROM_SELECTION", "max_ona < " + str(ona + 1), None)
+        # Define the sharepoint and local locations location if applicable
+        self.staging_location = os.path.join(path, configs["staging_name"])
+        self.output_location = os.path.join(path, configs["output_name"])
 
-        # Create an onv feature
-        feature_layer = arcpy.management.MakeFeatureLayer(onv_layer, "FeatureLayer", f"ona = {ona}")
+        # Define variables
+        self.map = arcpy.mp.ArcGISProject("CURRENT").activeMap
+        self.scids = configs["scids"]
+        self.onv_layer_source = configs["onv_layer_source"]
 
-        # Select orders intersecting the current onv feature layer
-        arcpy.management.SelectLayerByLocation(orders_layer, "INTERSECT", feature_layer, None, "ADD_TO_SELECTION")
+        # Define feature layers
+        self.orders_layer = self.find_layer_by_source(configs["orders_layer_source"] + "\\" + configs["orders_layer_name"], "")
+        self.original_orders_layer_query = self.orders_layer.definitionQuery
+        self.orders_layer.definitionQuery = configs["orders_layer_query"]
+        
+        # run main program
+        self.iterate()
+        self.cleanup()
 
-    # Deselect orders that do not use the spacecraft consitant with the onv
-    arcpy.management.SelectLayerByAttribute(orders_layer, "REMOVE_FROM_SELECTION", scid + " = 0", None)
+    def find_layer_by_source(self, source_path, query_req):
+        """ Returns a layer of the given source and name
 
-    arcpy.AddMessage("Done")
+        :param source_path: String, Url to the geoserver location
+        :param query_req: String, an SQL query expression
+        """
 
-def create_order_layers(local, orders_layer_name, onv_layer_names, sharepoint_location):
-    """ Create feature classes of available orders and add them to the map """
-    
-    # Get the active map document and data frame
-    project = arcpy.mp.ArcGISProject("CURRENT")
-    map = project.activeMap
-    output_file_names = []
+        # Loop through layers looking for matching URL and Name
+        for layer in self.map.listLayers():
+            arcpy.AddMessage(str(layer.name))
+            try:
+                desc = arcpy.Describe(layer)
+                query = layer.listDefinitionQueries()[0]
 
-    # Save the order layer and it's symbology in a variable
-    orders_layer = map.listLayers(orders_layer_name)[0]
-    orders_layer_symbology = orders_layer.symbology
+                # Return the layer if Url matches the given path and the query requirement is in the query
+                # (the onv layers will have a query specifying the day)
+                if desc.catalogPath == source_path and query_req in query['sql']:
+                    return layer
 
-    # Create a dictionary of: { onv layer name: onv layer }
-    onv_dict = {k: map.listLayers(k)[0] for k in onv_layer_names}
-    
-    # Create and export a feature class of available ordres for each ona layer in the list
-    for onv in onv_dict:
+            except:
+                continue
 
-        # Get the text before the second underscore in the layer name
-        split_name = onv.split('_')
-        scid = split_name[0]
-        output_name = "available_orders_" + '_'.join(split_name[:2])
-        output_file_names.append(output_name)
+        return None
 
+    def get_selected(self, layer, field):
+        """ Returns a list of order ids from the given layer that are currently selected 
+        
+        :param layer: Feature Layer, the layer with the selection
+        :param field: String, the field from which to gather the values from selected rows
+        """
 
-        # Select the orders available on the given spacecraft and day
-        select_available_orders(orders_layer, onv_dict[onv], scid)
+        desc = arcpy.Describe(layer)
+        oid_field = desc.OIDFieldName 
 
-        # Export to desired location(s) and add to the map if local
-        if sharepoint_location:
-            # Export as a shapefile to the sharepoint location
-            arcpy.conversion.ExportFeatures(orders_layer, sharepoint_location + "\\" + output_name)
+        # Create a list of selected rows
+        with arcpy.da.SearchCursor(layer, [oid_field]) as cursor:
+            selected_ids = [str(row[0]) for row in cursor]
 
-            if local:
-                # Export as a feature class in the default geodatabase
-                arcpy.conversion.ExportFeatures(orders_layer, local + "\\" + output_name)
-                            
-                # Add the feature layer to the map and apply symbology
-                map.addDataFromPath(local + "\\" + output_name)
-                map.listLayers()[0].symbology = orders_layer_symbology
+        selected_values = []
+        # Create a list of values from the given field
+        with arcpy.da.SearchCursor(layer, [oid_field, field]) as cursor:
+            for row in cursor:
+                selected_values.append(row[1])
 
+        return selected_values
+
+    def select_orders_by_ona(self, orders_layer, onv_layer):
+        """ Select orders accessable based on the order's max ONA vlaue with the given onv layer
+        
+        :param orders_layer: Feature Layer, layer of orders to select from
+        :param onv_layer: Feature Layer, layer of spacecraft onv to intersect the orders layer 
+        """
+
+        # Definition query values
+        ona_values = [35, 30, 25, 20, 15]
+        
+        # Select orders intersecting the 45deg segments of the rev (max selection)
+        arcpy.management.SelectLayerByLocation(orders_layer, "INTERSECT", onv_layer, None, "NEW_SELECTION")
+
+        # Select only the orders that are avaialble based on their max ONA value    
+        for ona in ona_values:
+
+            # Deselect orders with ONA under current value
+            arcpy.management.SelectLayerByAttribute(orders_layer, "REMOVE_FROM_SELECTION", "max_ona < " + str(ona + 1), None)
+
+            # Create an onv feature
+            feature_layer = arcpy.management.MakeFeatureLayer(onv_layer, "FeatureLayer", f"ona = {ona}")
+
+            # Select orders intersecting the current onv feature layer
+            arcpy.management.SelectLayerByLocation(orders_layer, "INTERSECT", feature_layer, None, "ADD_TO_SELECTION")
+
+    def select_orders_by_sun_el(self, orders_layer, onv_layer):
+        """ Select orders accessable based on the order's min sun el vlaue with the given onv layer
+        
+        :param orders_layer: Feature Layer, layer of orders to select from
+        :param onv_layer: Feature Layer, layer of spacecraft onv to intersect the orders layer 
+        """
+        sun_els = [10, 15, 30]
+
+        # Select orders intersecting the entire onv layer
+        arcpy.management.SelectLayerByLocation(orders_layer, "INTERSECT", onv_layer, None, "NEW_SELECTION")
+
+        for sun_el in sun_els:
+
+            # Deselect orders with sun el above current value
+            arcpy.management.SelectLayerByAttribute(orders_layer, "REMOVE_FROM_SELECTION", "min_sun_elevation > " + str(sun_el), None)
+
+            # Create a sun el feature
+            feature_layer = arcpy.management.MakeFeatureLayer(onv_layer, "FeatureLayer", f"sun_el > {sun_el}")
+
+            # Select orders intersecting the current sun el feature layer
+            arcpy.management.SelectLayerByLocation(orders_layer, "INTERSECT", feature_layer, None, "ADD_TO_SELECTION")
+
+    def delete_files(self, folder):
+        """ 
+        Deletes out the files in the given folder
+
+        :param folder: String, the path to the folder of files to delete 
+        """
+
+        for file in os.listdir(folder):
+            file_path = os.path.join(folder,  file)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    arcpy.AddMessage(f"Deleted: {file}")
+                except:
+                    arcpy.AddMessage(f"Could not delete: {file}")
+                    continue
+
+    def move_files(self, source_folder, target_folder):
+        """ 
+        Moves all files in a given folder to the given output folder  
+
+        :param souce_folder: String, the path of the folder to move files from
+        "param target_folder: String, the path of the folder to move files to  
+        """
+
+        for file in os.listdir(source_folder):
+            source_path = os.path.join(source_folder, file)
+            dest_path = os.path.join(target_folder, file)
+            shutil.move(source_path, dest_path)
+
+    def produce_shape(self, scid, day):
+        """ Identifies the accessible orders based on the given spacecraft and day and exports a shapefile of these orders to a location 
+        
+        :param scid: String, the spacecraft ID
+        :param day: Integer, the given day to assess; 0 = today, 1 = tomorrow 
+        """
+
+        # Get the onv layer
+        onv_source = self.onv_layer_source + "\\" + f"onv_{scid}"
+        onv_layer = self.find_layer_by_source(onv_source, f'days = {day}')
+        
+        # Create list of orders available by scid
+        arcpy.management.SelectLayerByAttribute(self.orders_layer, "NEW_SELECTION", scid + " = 1", None)
+        available_by_scid = self.get_selected(self.orders_layer, 'external_id')
+
+        # Create list of orders available by ONA
+        self.select_orders_by_ona(self.orders_layer, onv_layer)
+        available_by_ona = self.get_selected(self.orders_layer, 'external_id')
+
+        # Create list of orders available by sun el
+        self.select_orders_by_sun_el(self.orders_layer, onv_layer)
+        available_by_sun_el = self.get_selected(self.orders_layer, 'external_id')
+
+        # Create list of the intersection of scid and ONA
+        intersect_1 = [value for value in available_by_scid if value in available_by_ona]
+
+        # Create list of intersection of previous union and sun el
+        accessible_orders = [value for value in intersect_1 if value in available_by_sun_el]
+
+        # Select orders by order id
+        if accessible_orders:
+            criteria = "external_id IN (" + ",".join("'" + str(x) + "'" for x in accessible_orders)+ ")"
+            arcpy.AddMessage(criteria)
         else:
-            # Export as a feature class in the default geodatabase
-            arcpy.conversion.ExportFeatures(orders_layer, local + "\\" + output_name)
+            criteria = "external_id IN ('0')"
 
-            # Add the feature layer to the map and apply symbology
-            map.addDataFromPath(local + "\\" + output_name)
-            map.listLayers()[0].symbology = orders_layer_symbology
+        # Determine naming label based on day
+        if day == 0:
+            day = "today"
+        elif day == 1:
+            day = "tomorrow"
 
+        # Create output shapefile in staging location
+        outtput = os.path.join(self.staging_location, f"available_on_{scid}_{day}")
+        arcpy.conversion.ExportFeatures(self.orders_layer, outtput, criteria)
 
-    return output_file_names
+    def iterate(self):
+        """ This function iterates through the spacecrafts and days calling the function to produce the shapefiles
+        """
 
-def delete_current_files(file_location, file_names):
-    """ Deletes out the current files in the folder """
+        # Loop throuhg each spacecraft and produce the 
+        for scid in self.scids:
 
-    for file in file_names:
-        file_path = os.path.join(file_location,  file)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            arcpy.AddMessage(f"Deleted: {file}")
+            for day in [0,1]:
 
-def move_new_files(staging_location, output_location, file_names):
-    """ Moves the newly generated files to the output folder """
+                self.produce_shape(scid, day)
 
-    for file in os.listdir(staging_location):
-        source_path = os.path.join(staging_location, file)
-        dest_path = os.path.join(output_location, file)
-        shutil.move(source_path, dest_path)
-        arcpy.AddMessage(f"Moved: {file}")
+    def cleanup(self):
+        """ Thid function takes the final actions needed including moving the shapefiles from the staging location to the final location 
+        """
 
+        # Set the orders layer definition query back to the original
+        self.orders_layer.definitionQuery = self.original_orders_layer_query
+        
+        # Delete current files in output location
+        self.delete_files(self.output_location)
 
-def run(local, sharepoint, path):
-    """ This function controls what is run by the tool """
-
-    # Load .json file with parameters
-    with open('config.json', 'r', errors="ignore") as file:
-        configs = json.load(file)
-
-    # Define the sharepoint and local locations location if applicable
-    staging_location = os.path.join(path, "Shapefile_Staging")
-    if sharepoint: 
-        output_location = os.path.join(path, "Shapefile_Output")
-    else: local = True
-    if local: local = arcpy.env.workspace
-
-    # Define the file names
-    orders_layer_name = configs["orders_layer_name"]
-    onv_layer_names = configs["onv_layer_names"]
-
-    # Create the order layers and save the outputed file names to a list 
-    file_names = create_order_layers(local, 
-                        orders_layer_name, 
-                        onv_layer_names, 
-                        staging_location)
-    
-    # Creating a list of file names
-    file_types = ['.cpg', '.dbf', '.prj', '.sbn', '.sbx', '.shp', '.shp.xml', '.shx']
-    all_files = [f"{name}{type}" for name in file_names for type in file_types]
-    
-    if sharepoint:
-
-        # Delete all files in the output folder
-        delete_current_files(output_location, all_files)
-
-        # Move the files in the saging location to the output folder
-        move_new_files(staging_location, output_location, all_files)
+        # Move files from staging location to output location
+        self.move_files(self.staging_location, self.output_location)
 
 
-
-    
+        
